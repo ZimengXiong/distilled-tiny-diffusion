@@ -1,7 +1,7 @@
 # tiny-diffusion
 
 A character-level language diffusion model for text generation. The model is a modified version of the [nanochat gpt](https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
-) implemenation and is trained on Tiny Shakespeare.
+) implementation and is trained on Tiny Shakespeare! It is only 10.7 million parameters, so you can try it out locally!
 
 ![Demo](animations/animation.gif)
 
