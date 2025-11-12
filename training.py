@@ -1,8 +1,10 @@
 """
 Training script for discrete diffusion model with a BPE tokenizer.
+Supports resuming from checkpoints with --resume flag.
 """
 
 import os
+import re
 from pathlib import Path
 
 import torch
@@ -65,14 +67,27 @@ def train_step(model, x_0, mask_schedule, optimizer):
     optimizer.step()
     return loss.item()
 
-def train(model, data_loader, mask_schedule, optimizer, num_steps=10000, sample_interval=1000, dataset_tokens=None):
+def extract_step_from_filename(filename):
+    """Extract step number from checkpoint filename like 'model_step_1000.pt'"""
+    match = re.search(r'step_(\d+)', str(filename))
+    if match:
+        return int(match.group(1))
+    return None
+
+def train(model, data_loader, mask_schedule, optimizer, scheduler, num_steps=10000, 
+          sample_interval=1000, dataset_tokens=None, start_step=0, checkpoint_prefix="diffusion_model"):
     model.train()
     os.makedirs("weights", exist_ok=True)
-    pbar = tqdm(range(num_steps), desc="Training")
+    
+    pbar = tqdm(range(start_step, num_steps), desc="Training", initial=start_step, total=num_steps)
     for step in pbar:
         x_0 = next(data_loader)
         loss = train_step(model, x_0, mask_schedule, optimizer)
-        pbar.set_postfix({"loss": f"{loss:.4f}"})
+        scheduler.step()
+        
+        current_lr = scheduler.get_last_lr()[0]
+        pbar.set_postfix({"loss": f"{loss:.4f}", "lr": f"{current_lr:.2e}"})
+        
         if (step + 1) % sample_interval == 0:
             model.eval()
             with torch.no_grad():
@@ -93,59 +108,143 @@ def train(model, data_loader, mask_schedule, optimizer, num_steps=10000, sample_
                 tqdm.write(f"\n--- Sample at step {step + 1} ---")
                 tqdm.write(text[:300])
                 tqdm.write("---\n")
-            checkpoint_path = f"weights/bpe_diffusion_model_step_{step + 1}.pt"
-            torch.save(model.state_dict(), checkpoint_path)
+            
+            # Save checkpoint
+            checkpoint_path = f"weights/{checkpoint_prefix}_step_{step + 1}.pt"
+            checkpoint = {
+                'step': step + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'config': model.config,
+            }
+            torch.save(checkpoint, checkpoint_path)
+            tqdm.write(f"Checkpoint saved: {checkpoint_path}")
+            
             model.train()
 
 def main():
-    batch_size = 64
-    max_iters = 20000
-    eval_interval = 1000
-    learning_rate = 3e-4
-    data_path = Path("data/tiny_shakespeare.txt")
+    import argparse
+    parser = argparse.ArgumentParser(description="Train diffusion model with optional resume")
+    parser.add_argument("--resume", type=str, default=None,
+                       help="Resume from checkpoint (e.g., 'weights/diffusion_model_step_5000.pt')")
+    parser.add_argument("--steps", type=int, default=20000,
+                       help="Total training steps")
+    parser.add_argument("--batch-size", type=int, default=64,
+                       help="Batch size")
+    parser.add_argument("--lr", type=float, default=3e-4,
+                       help="Learning rate")
+    parser.add_argument("--eval-interval", type=int, default=1000,
+                       help="Sample and checkpoint interval")
+    parser.add_argument("--data", type=str, default="data/tiny_shakespeare.txt",
+                       help="Training data path")
+    parser.add_argument("--checkpoint-prefix", type=str, default="diffusion_model",
+                       help="Prefix for checkpoint filenames")
+    args = parser.parse_args()
     
-    # 1. Initialize tokenizer FIRST
+    data_path = Path(args.data)
+    
+    # 1. Initialize tokenizer
     print("Initializing tokenizer...")
     get_tokenizer(data_paths=[data_path])
     v_size = vocab_size()
     m_id = mask_token_id()
     print(f"Tokenizer ready. Vocab size: {v_size}, Mask ID: {m_id}\n")
     
-    # 2. Create config
-    config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
-    print(f"Config: seq_len={config.sequence_len}, vocab={config.vocab_size}, mask_id={config.mask_token_id}")
-    
-    # 3. Device
+    # 2. Device
     device = torch.device("cuda" if torch.cuda.is_available() else
                          ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Using device: {device}\n")
     
-    # 4. Model
-    model = DiffusionTransformer(config).to(device)
-    model.init_weights()
+    # 3. Resume or create new model
+    start_step = 0
     
-    # 5. MPS warmup
-    if device.type == "mps":
-        print("Warming up MPS...")
-        with torch.no_grad():
-            dummy = torch.randint(0, config.vocab_size, (1, config.sequence_len), device=device)
-            dummy_t = torch.tensor([0], device=device)
-            _ = model(dummy, dummy_t)
-        print("MPS ready!")
+    if args.resume:
+        print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        
+        # Extract step from checkpoint
+        if 'step' in checkpoint:
+            start_step = checkpoint['step']
+        else:
+            # Try to extract from filename
+            step_from_name = extract_step_from_filename(args.resume)
+            if step_from_name:
+                start_step = step_from_name
+        
+        print(f"Resuming from step {start_step}")
+        
+        # Load config
+        if 'config' in checkpoint:
+            config = checkpoint['config']
+        else:
+            # Fallback: create config with tokenizer values
+            config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
+        
+        # Create model and load state
+        model = DiffusionTransformer(config).to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Create optimizer and scheduler
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+        from torch.optim.lr_scheduler import OneCycleLR
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            total_steps=args.steps,
+            pct_start=0.1,
+            anneal_strategy='cos'
+        )
+        
+        # Load optimizer and scheduler states
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        print(f"Model, optimizer, and scheduler restored from checkpoint\n")
+    else:
+        print("Starting fresh training...")
+        # Create new config
+        config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
+        print(f"Config: seq_len={config.sequence_len}, vocab={config.vocab_size}, mask_id={config.mask_token_id}")
+        
+        # Create new model
+        model = DiffusionTransformer(config).to(device)
+        model.init_weights()
+        
+        # MPS warmup
+        if device.type == "mps":
+            print("Warming up MPS...")
+            with torch.no_grad():
+                dummy = torch.randint(0, config.vocab_size, (1, config.sequence_len), device=device)
+                dummy_t = torch.tensor([0], device=device)
+                _ = model(dummy, dummy_t)
+            print("MPS ready!")
+        
+        # Create optimizer and scheduler
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+        from torch.optim.lr_scheduler import OneCycleLR
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            total_steps=args.steps,
+            pct_start=0.1,
+            anneal_strategy='cos'
+        )
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {num_params:,}\n")
     
-    # 6. Training setup
+    # 4. Training setup
     mask_schedule = MaskedDiffusionSchedule(config.diffusion_steps, config.mask_token_id, config.context_len)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     
-    # 7. Data loader
+    # 5. Data loader
     print("Creating data loader...")
-    data_loader = get_data_loader(str(data_path), batch_size, config.sequence_len, device)
+    data_loader = get_data_loader(str(data_path), args.batch_size, config.sequence_len, device)
     print("Data loader ready!\n")
     
-    # 8. Context tokens
+    # 6. Context tokens
     dataset_tokens = None
     if config.context_len > 0:
         with open(data_path, "r", encoding="utf-8") as f:
@@ -153,11 +252,15 @@ def main():
         dataset_tokens = encode_text(text)
         print(f"Loaded {len(dataset_tokens)} tokens for context sampling\n")
     
-    # 9. Train
-    print("Starting training...\n")
-    train(model, data_loader, mask_schedule, optimizer, max_iters, eval_interval, dataset_tokens)
-    torch.save(model.state_dict(), "weights/diffusion_model.pt")
-    print("Model saved to weights/diffusion_model.pt")
+    # 7. Train
+    print(f"Starting training from step {start_step} to {args.steps}...\n")
+    train(model, data_loader, mask_schedule, optimizer, scheduler, args.steps, 
+          args.eval_interval, dataset_tokens, start_step, args.checkpoint_prefix)
+    
+    # Final save
+    final_path = f"weights/{args.checkpoint_prefix}_final.pt"
+    torch.save(model.state_dict(), final_path)
+    print(f"Training complete! Final model saved to {final_path}")
 
 if __name__ == "__main__":
     main()
