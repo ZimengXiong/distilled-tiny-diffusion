@@ -1,0 +1,99 @@
+(tiny-diffusion) zimengx@U7 ~/C/M/L/tiny-diffusion (main) [SIGINT]> python3 distill.py
+Using device: mps
+Loading teacher model...
+Teacher params: 10,764,288
+Initializing student model...
+Student params: 1,032,192
+Compression ratio: 10.4x
+
+No checkpoint found. Starting fresh.
+                                                                                                                                                                                                                                                  
+--- Student sample at step 1000 ---
+et ane te te te te te te te te thet te tene tne te teenette one te tene tne teene teene teenet te te te torte te te one thet het tee  te te te tet thet hene the te te te te te te te te te te te te te                                           
+---                                                                                                                                                                                                                                               
+
+                                                                                                                                                                                                                                                  
+--- Student sample at step 2000 ---
+ the the the the the your not tou your your fou the,                                                                                                                                                                                              
+The the the the the the the he you you not to to you to your your.
+
+ANCINNIO:
+I shat the the not nof not not nof your nof nof not no, thee the the 
+---                                                                                                                                                                                                                                               
+
+                                                                                                                                                                                                                                                  
+--- Student sample at step 3000 ---
+ ale.                                                                                                                                                                                                                                             
+
+For you, he woold, you for your your lord, the come for your your your for your your your for your your your for your your more for your more for your fore,
+For your fore for your fore for your
+---                                                                                                                                                                                                                                               
+
+                                                                                                                                                                                                                                                  
+--- Student sample at step 4000 ---
+,                                                                                                                                                                                                                                                 
+And forme you your your for your your your hour your hour your hour hour your how.
+
+CAUTIUS:
+The lord you for your your hold for you for fore for you for fore you fore fore for not.
+
+
+PAUTIUS:
+The n
+---                                                                                                                                                                                                                                               
+
+                                                                                                                                                                                                                                                  
+--- Student sample at step 5000 ---
+ folles,                                                                                                                                                                                                                                          
+And hour your your love your your done.
+
+ROMEO:
+You more you more your more you done.
+You more your more your your more hone.
+
+MANENIUS:
+Mare you not not you more not you lord,
+And here you m
+---                                                                                                                                                                                                                                               
+
+                                                                                                                                                                                                                                                  
+--- Student sample at step 6000 ---
+ be the name.                                                                                                                                                                                                                                     
+
+POMPERO:
+The have the for the son the papines,
+The the that be the have here for the maines,
+The for there you the have you so confess,
+And have your love your your your love.
+
+LUMNIO:
+
+---                                                                                                                                                                                                                                               
+
+Distilling:  68%|███████████████████████████████████████████████████████████████████████████████████████████████                                             | 6787/10000 [16:17<07:36,  7.03it/s, loss=1.9650, kl=1.8850, ce=2.1515, lr=1.28e-04]Distilling:  68%|███████████████████████████████████████████████████████████████████████████████████████████████                                             | 6789/10000 [16:18<07:37,  7.01it/s, loss=2.1046, kl=2.0245, ce=2.2914, lr=1.28e-04]Distilling:  68%|███████████████████████████████████████████████████████████████████████████████████████████████                                             | 6790/10000 [16:18<07:37,  7.02it/s, loss=2.0408, kl=1.9296, ce=2.3001, lr=1.28e-04]Distilling:  68%|███████████████████████████████████████████████████████████████████████████████████████████████                                             | 6791/10000 [16:18<07:36,  7.03it/s, loss=2.0871, kl=2.0095, ce=2.2681, lr=1.28e-04]Distilling:  68%|███████████████████████████████████████████████████████████████████████████████████████████████                                             | 6792/10000 [16:18<07:36,  7.03it/s, loss=2.0903, kl=1.9934, ce=2.3163, lr=1.28e-04]Distilling:  68%|███████████████████████████████████████████████████████████████████████████████████████████████                                             | 6793/10000 [16:18<07:37,  7.01it/s, loss=2.1108, kl=2.0391, ce=2.2781, lr=1.28e-04]                                                                                                                                                                                                                                                  
+--- Student sample at step 7000 ---
+ the have herse,                                                                                                                                                                                                                                  
+The thee here the these have his made the,
+When the thee have his sire, and the pattled,
+And for the take the make the matter resten,
+And the land, and they your have your have you ha
+---                                                                                                                                                                                                                                               
+
+                                                                                                                                                                                                                                                  
+--- Student sample at step 8000 ---
+                                                                                                                                                                                                                                                  
+
+LARENCE:
+I have the take the matter that the falle dones,
+And that have to make your have your have.
+
+ROMEO:
+No, for your have you more you some to shalle.
+
+HORTESTIO:
+
+QUEEN ELIZABETH:
+Where you mo
+---                                                                                                                                                                                                                                               
+
+Distilling:  82%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████▏                         | 8153/10000 [19:34<04:19,  7.12it/s, loss=1.9267, kl=1.8464, ce=2.1140, lr=4.52e-05
