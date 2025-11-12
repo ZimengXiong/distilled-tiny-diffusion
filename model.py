@@ -23,7 +23,7 @@ class DiffusionConfig:
     n_head: int = 6
     n_embd: int = 384
     diffusion_steps: int = 128
-    context_len: int = 16
+    context_len: int = 64
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))

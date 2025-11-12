@@ -1,6 +1,6 @@
 """
-chat.py - Single-turn conversation (128 tokens max)
-Input: User says something → Output: AI responds once
+chat.py - Single-turn chat with live diffusion animation
+128 tokens, clean single responses
 """
 
 import argparse
@@ -40,14 +40,20 @@ def decode_tokens(tokens):
     from tokenizer_utils import decode_tokens as bpe_decode
     return bpe_decode(tokens)
 
+def clear_screen():
+    print("\033[2J\033[H", end="", flush=True)
+
+def print_at(row, col, text):
+    print(f"\033[{row};{col}H{text}", end="", flush=True)
+
 def generate_response(model, user_input, device, temperature=1.0, confidence=0.9):
-    """Generate single AI response to user input"""
+    """Generate with animation"""
     
     # Format input
     input_text = f"Human 1: {user_input} Human 2: "
     input_tokens = encode_text(input_text)
     
-    # Truncate if too long (shouldn't happen with 128 limit)
+    # Truncate context if needed
     max_context = 64
     if len(input_tokens) > max_context:
         input_tokens = input_tokens[-max_context:]
@@ -55,7 +61,7 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
     context_tokens = input_tokens.unsqueeze(0).to(device)
     ctx_len = context_tokens.size(1)
     
-    # Initialize full 128-token sequence
+    # Initialize
     seq_len = 128
     mask_token_id = model.config.mask_token_id
     
@@ -63,10 +69,19 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
     x[:, :ctx_len] = context_tokens
     
     masked_positions = torch.ones(1, seq_len, dtype=torch.bool, device=device)
-    masked_positions[:, :ctx_len] = False  # Context is fixed
+    masked_positions[:, :ctx_len] = False
     
-    # Generate
     step = 0
+    start_time = time.time()
+    
+    # Setup display
+    clear_screen()
+    print("╔════════════════════════════════════════════════════════════════════╗")
+    print("║                    GENERATING RESPONSE...                          ║")
+    print("╚════════════════════════════════════════════════════════════════════╝")
+    print()
+    
+    # Generation loop with animation
     while masked_positions.any():
         t_batch = torch.full((1,), step, device=device, dtype=torch.long)
         t_batch = torch.clamp(t_batch, 0, model.config.diffusion_steps - 1)
@@ -86,19 +101,59 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
             x = torch.where(above_threshold, predicted_tokens, x)
             masked_positions = masked_positions & ~above_threshold
         
+        # Animate every 2 steps
+        if step % 2 == 0:
+            # Decode current state
+            text_parts = []
+            current_segment = []
+            
+            for i in range(seq_len):
+                if masked_positions[0, i]:
+                    if current_segment:
+                        text_parts.append(decode_tokens(torch.tensor(current_segment)))
+                        current_segment = []
+                    text_parts.append("█")
+                else:
+                    current_segment.append(x[0, i].item())
+            
+            if current_segment:
+                text_parts.append(decode_tokens(torch.tensor(current_segment)))
+            
+            current_text = "".join(text_parts)
+            
+            # Extract just the AI part for display
+            if "Human 2:" in current_text:
+                display = current_text.split("Human 2:")[-1]
+            else:
+                display = current_text[ctx_len:]
+            
+            # Wrap at 66 chars
+            lines = []
+            for i in range(0, len(display), 66):
+                lines.append(display[i:i+66])
+            
+            # Display up to 10 lines
+            for idx in range(10):
+                if idx < len(lines):
+                    print_at(5 + idx, 1, f"  {lines[idx]:<66}")
+                else:
+                    print_at(5 + idx, 1, " " * 70)
+            
+            # Stats
+            num_masked = masked_positions.sum().item()
+            elapsed = time.time() - start_time
+            print_at(17, 1, "─" * 70)
+            print_at(18, 1, f"  Step: {step:3d} | Masked: {num_masked:3d}/{seq_len} | Time: {elapsed:.1f}s" + " " * 20)
+        
         step += 1
-        if step % 10 == 0:
-            print(f"\rGenerating... {step} steps", end="", flush=True)
+        time.sleep(0.015)  # Smooth animation
     
-    print()
-    
-    # Decode full sequence
+    # Final decode
     full_text = decode_tokens(x[0])
     
     # Extract AI response
     if "Human 2:" in full_text:
         ai_response = full_text.split("Human 2:")[-1].strip()
-        # Stop at any speaker marker
         for marker in ["Human 1:", "Human 2:"]:
             if marker in ai_response:
                 ai_response = ai_response.split(marker)[0].strip()
@@ -106,8 +161,11 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
     else:
         ai_response = full_text.strip()
     
-    # Clean up
     ai_response = re.sub(r'Human [12]\s*:', '', ai_response).strip()
+    
+    # Move cursor down
+    print_at(20, 1, "")
+    print("\n" + "="*70)
     
     return ai_response
 
@@ -123,22 +181,27 @@ def main():
     
     print(f"Loading model...")
     model, config = load_model(args.model, device)
-    print(f"Ready! Seq len: {config.sequence_len}\n")
+    print(f"Ready! Seq: {config.sequence_len} tokens\n")
     
-    print("Single-turn chat (type 'quit' to exit)\n")
+    print("╔════════════════════════════════════════════════════════════════════╗")
+    print("║                    DIFFUSION CHAT (128 Tokens)                    ║")
+    print("║  Type 'quit' to exit                                              ║")
+    print("╚════════════════════════════════════════════════════════════════════╝\n")
     
     while True:
         user_input = input("You: ").strip()
         
         if not user_input:
             continue
+        
         if user_input.lower() in ["quit", "exit", "q"]:
-            print("Goodbye!")
+            print("\nGoodbye!")
             break
         
         ai_response = generate_response(model, user_input, device, args.temperature, args.confidence)
         
-        print(f"AI: {ai_response}\n")
+        print(f"\nAI: {ai_response}")
+        print("="*70 + "\n")
 
 if __name__ == "__main__":
     main()
