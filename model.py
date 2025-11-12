@@ -16,7 +16,7 @@ from tokenizer_utils import (
 
 @dataclass
 class DiffusionConfig:
-    sequence_len: int = 256
+    sequence_len: int = 128
     vocab_size: int = 4096  # Default, override in training
     mask_token_id: int = 1   # Default, override in training
     n_layer: int = 6

@@ -1,49 +1,69 @@
 """
-Preprocess conversational data to add [TURN] boundary tokens.
-Standardizes speaker labels and adds explicit turn markers.
+Preprocess data to single-turn QA format
+Only keeps conversations where both turns fit in 128 tokens
 """
 
-import re
 from pathlib import Path
+import re
+from tokenizer_utils import get_tokenizer, encode_text
 
-def preprocess_conversations(input_file: Path, output_file: Path):
-    """Add [TURN] tokens and standardize speaker labels"""
+def preprocess_single_turn(input_file, output_file, max_tokens=128):
+    """Convert to single-turn QA, filter by length"""
+    
+    # Initialize tokenizer
+    get_tokenizer(data_paths=[input_file])
+    
     with open(input_file, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    print(f"Original text length: {len(text)} characters")
+    # Split into conversation turns
+    turns = re.split(r'(Human [12]\s*:)', text)
     
-    # Standardize speaker labels: Human 1 -> Human, Human 2 -> AI
-    text = re.sub(r'Human\s*1\s*:', '[TURN]Human:', text)
-    text = re.sub(r'Human\s*2\s*:', '[TURN]AI:', text)
+    # Group into pairs
+    pairs = []
+    i = 0
+    while i < len(turns) - 2:
+        if 'Human 1' in turns[i]:
+            speaker1 = turns[i]
+            content1 = turns[i+1].strip()
+            
+            if i+2 < len(turns) and 'Human 2' in turns[i+2]:
+                speaker2 = turns[i+2]
+                content2 = turns[i+3].strip() if i+3 < len(turns) else ""
+                
+                # Create pair
+                input_text = f"Human 1: {content1}"
+                output_text = f"Human 2: {content2}"
+                
+                # Check token length
+                input_tokens = encode_text(input_text)
+                output_tokens = encode_text(output_text)
+                
+                total_len = len(input_tokens) + len(output_tokens)
+                
+                # Only keep if fits in 128 tokens
+                if total_len <= max_tokens and len(content2) > 5:
+                    pairs.append(f"{input_text} {output_text}")
+                
+                i += 4
+            else:
+                i += 2
+        else:
+            i += 1
     
-    # Also handle cases where there's no space
-    text = text.replace('Human1:', '[TURN]Human:')
-    text = text.replace('Human2:', '[TURN]AI:')
+    print(f"Original pairs: ~{len(turns)//4}")
+    print(f"Filtered pairs (≤{max_tokens} tokens): {len(pairs)}")
     
-    # Remove any double [TURN] tokens that might have been created
-    text = text.replace('[TURN][TURN]', '[TURN]')
-    
-    # Ensure we start with [TURN]
-    if not text.startswith('[TURN]'):
-        text = '[TURN]' + text
-    
-    print(f"Processed text length: {len(text)} characters")
-    print(f"Number of turns: {text.count('[TURN]')}")
-    
-    # Save processed text
+    # Save
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(text)
+        f.write(' '.join(pairs))
     
-    print(f"Saved to {output_file}")
-    
-    # Show sample
-    print("\nSample of processed text:")
-    print(text[:500])
+    print(f"\nSaved to {output_file}")
+    print(f"Sample: {pairs[0][:200]}")
 
 if __name__ == "__main__":
     input_path = Path("data/tiny_shakespeare.txt")
-    output_path = Path("data/conversations_with_turns.txt")
+    output_path = Path("data/conversations_128.txt")
     
-    preprocess_conversations(input_path, output_path)
+    preprocess_single_turn(input_path, output_path, max_tokens=128)
