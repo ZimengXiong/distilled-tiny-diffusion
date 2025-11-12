@@ -1,5 +1,5 @@
 """
-chat.py - Single-turn chat with [EOS] early stopping
+chat.py - Alpaca expert chat with [EOS] stopping and animation
 """
 
 import argparse
@@ -40,7 +40,10 @@ def decode_tokens(tokens):
     return bpe_decode(tokens)
 
 def extract_first_response(full_text):
-    """Extract first AI response, stop at [EOS] or speaker change"""
+    """Extract first AI response, stop at [EOS], remove [PAD]"""
+    
+    # Remove [PAD] tokens
+    full_text = re.sub(r'\[PAD\]', '', full_text)
     
     # Stop at [EOS]
     if "[EOS]" in full_text:
@@ -49,14 +52,13 @@ def extract_first_response(full_text):
     # Find first Human 2:
     if "Human 2:" not in full_text:
         clean = re.sub(r'Human [12]\s*:', '', full_text).strip()
-        sentences = re.split(r'[.!?]+\s+', clean)
-        return sentences[0][:100] if sentences else "..."
+        return clean[:100] if clean else "..."
     
     # Get text after first Human 2:
     parts = full_text.split("Human 2:")
     ai_text = parts[1] if len(parts) > 1 else parts[0]
     
-    # Stop at next speaker
+    # Stop at next speaker marker
     for marker in ["Human 1:", "Human 2:"]:
         if marker in ai_text:
             ai_text = ai_text.split(marker)[0]
@@ -65,9 +67,6 @@ def extract_first_response(full_text):
     # Clean up
     ai_text = ai_text.strip()
     ai_text = re.sub(r'Human [12]\s*:', '', ai_text).strip()
-    
-    # Remove [PAD] tokens
-    ai_text = re.sub(r'\[PAD\]', '', ai_text).strip()
     
     return ai_text if ai_text else "..."
 
@@ -78,11 +77,12 @@ def print_at(row, col, text):
     print(f"\033[{row};{col}H{text}", end="", flush=True)
 
 def generate_response(model, user_input, device, temperature=1.0, confidence=0.9):
-    """Generate with [EOS] early stopping"""
+    """Generate with [EOS] early stopping and animation"""
     
     from tokenizer_utils import get_tokenizer
     tokenizer = get_tokenizer()
     eos_token_id = tokenizer.token_to_id("[EOS]")
+    pad_token_id = tokenizer.token_to_id("[PAD]")
     
     # Format input
     input_text = f"Human 1: {user_input} Human 2: "
@@ -113,11 +113,11 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
     # Setup display
     clear_screen()
     print("╔════════════════════════════════════════════════════════════════════╗")
-    print("║                    GENERATING RESPONSE...                          ║")
+    print("║                    DIFFUSION GENERATION                            ║")
     print("╚════════════════════════════════════════════════════════════════════╝")
     print()
     
-    # Generation loop
+    # Generation loop with animation
     while masked_positions.any() and not eos_found:
         t_batch = torch.full((1,), step, device=device, dtype=torch.long)
         t_batch = torch.clamp(t_batch, 0, model.config.diffusion_steps - 1)
@@ -141,8 +141,9 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
             if (x[0, ctx_len:] == eos_token_id).any():
                 eos_found = True
         
-        # Animation
-        if step % 3 == 0:
+        # Animation every 2 steps
+        if step % 2 == 0:
+            # Decode current state
             text_parts = []
             current_segment = []
             
@@ -159,32 +160,39 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
                 text_parts.append(decode_tokens(torch.tensor(current_segment)))
             
             current_text = "".join(text_parts)
+            
+            # Extract AI response only
             display = extract_first_response(current_text)
             
+            # Wrap at 66 chars
             lines = []
             for i in range(0, len(display), 66):
                 lines.append(display[i:i+66])
             
-            for idx in range(10):
+            # Display up to 12 lines
+            for idx in range(12):
                 if idx < len(lines):
                     print_at(5 + idx, 1, f"  {lines[idx]:<66}")
                 else:
                     print_at(5 + idx, 1, " " * 70)
             
+            # Stats
             num_masked = masked_positions.sum().item()
             elapsed = time.time() - start_time
-            print_at(17, 1, "─" * 70)
-            status = "[EOS FOUND]" if eos_found else ""
-            print_at(18, 1, f"  Step: {step:3d} | Masked: {num_masked:3d}/{seq_len} | Time: {elapsed:.1f}s {status}" + " " * 10)
+            print_at(19, 1, "─" * 70)
+            
+            status = "[EOS FOUND - STOPPING]" if eos_found else ""
+            print_at(20, 1, f"  Step: {step:3d} | Masked: {num_masked:3d}/{seq_len} | Time: {elapsed:.1f}s {status:<20}" + " " * 5)
         
         step += 1
-        time.sleep(0.02)
+        time.sleep(0.015)
     
     # Final decode
     full_text = decode_tokens(x[0])
     ai_response = extract_first_response(full_text)
     
-    print_at(20, 1, "")
+    # Move cursor below animation
+    print_at(22, 1, "")
     print("\n" + "="*70)
     
     return ai_response
