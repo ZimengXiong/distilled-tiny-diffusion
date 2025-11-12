@@ -1,6 +1,6 @@
 """
 chat_tui.py - Interactive TUI to chat with diffusion model
-Shows live denoising animation during generation
+Shows live token-level denoising animation with color-coded confidence
 Usage: python chat_tui.py --model weights/diffusion_model.pt
 """
 
@@ -11,59 +11,92 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
 from rich.layout import Layout
-from rich.text import Text
 from rich.prompt import Prompt
-from rich.syntax import Syntax
+from rich.text import Text
 from model import DiffusionTransformer, DiffusionConfig, encode_text, decode_tokens
+from tokenizer_utils import get_tokenizer, vocab_size, mask_token_id, token_to_piece
 import time
 
 console = Console()
 
 def load_model(checkpoint_path, device):
     """Load model from checkpoint"""
-    # Try student config first, fall back to teacher
+    get_tokenizer()
+    v_size = vocab_size()
+    m_id = mask_token_id()
+    
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    
     try:
-        config = DiffusionConfig(n_layer=5, n_head=4, n_embd=128)  # Student
+        config = DiffusionConfig(
+            n_layer=5, 
+            n_head=4, 
+            n_embd=128,
+            vocab_size=v_size,
+            mask_token_id=m_id
+        )
         model = DiffusionTransformer(config).to(device)
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-        model_type = "Student (1M params)"
+        model.load_state_dict(state_dict)
+        model_type = "Student"
     except:
-        config = DiffusionConfig()  # Teacher
+        config = DiffusionConfig(
+            vocab_size=v_size,
+            mask_token_id=m_id
+        )
         model = DiffusionTransformer(config).to(device)
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-        model_type = "Teacher (10.7M params)"
+        model.load_state_dict(state_dict)
+        model_type = "Teacher"
     
     model.eval()
-    return model, config, model_type
+    num_params = sum(p.numel() for p in model.parameters())
+    return model, config, f"{model_type} ({num_params:,} params)"
+
+def get_confidence_style(confidence, is_masked):
+    """Get Rich style for token based on confidence level"""
+    if is_masked:
+        return "black on white"  # Masked tokens: white background
+    elif confidence >= 0.95:
+        return "black on green"  # Very confident: green
+    elif confidence >= 0.85:
+        return "black on cyan"   # Confident: cyan
+    elif confidence >= 0.70:
+        return "black on yellow" # Medium: yellow
+    else:
+        return "black on red"    # Low confidence: red
 
 def generate_with_animation(model, context_text, console, temperature=1.0, confidence_threshold=0.9):
-    """Generate text with live diffusion animation"""
+    """Generate text with live token-by-token colored animation"""
     device = next(model.parameters()).device
     seq_len = model.config.sequence_len
     mask_token_id = model.config.mask_token_id
     
     # Encode context
     context_tokens = None
+    ctx_len = 0
     if context_text and model.config.context_len > 0:
         context_encoded = encode_text(context_text)
         context_len = min(len(context_encoded), model.config.context_len)
         context_tokens = context_encoded[-context_len:].unsqueeze(0).to(device)
+        ctx_len = context_tokens.size(1)
     
     # Initialize masked sequence
     x = torch.full((1, seq_len), mask_token_id, dtype=torch.long, device=device)
     if context_tokens is not None:
-        ctx_len = context_tokens.size(1)
         x[:, :ctx_len] = context_tokens
     
     masked_positions = torch.ones(1, seq_len, dtype=torch.bool, device=device)
     if context_tokens is not None:
         masked_positions[:, :ctx_len] = False
     
+    # Track confidence for each position
+    token_confidences = torch.zeros(seq_len, device=device)
+    
     # Create live display
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="output", size=12),
+        Layout(name="output", ratio=3),
+        Layout(name="legend", size=4),
         Layout(name="stats", size=3)
     )
     
@@ -79,6 +112,10 @@ def generate_with_animation(model, context_text, console, temperature=1.0, confi
                 logits = model.forward(x, t_batch)
                 probs = F.softmax(logits / temperature, dim=-1)
                 confidences, predicted_tokens = torch.max(probs, dim=-1)
+                
+                # Store confidences
+                token_confidences = confidences[0]
+                
                 above_threshold = (confidences >= confidence_threshold) & masked_positions
                 
                 if not above_threshold.any():
@@ -90,19 +127,28 @@ def generate_with_animation(model, context_text, console, temperature=1.0, confi
                 x = torch.where(above_threshold, predicted_tokens, x)
                 masked_positions = masked_positions & ~above_threshold
             
-            # Update display
-            current_text = ""
-            for i in range(seq_len):
-                if x[0, i] == mask_token_id:
-                    current_text += "█"
-                else:
-                    char = decode_tokens([x[0, i].item()])
-                    current_text += char if char != "\n" else "↵"
+            # Build colored token display
+            rich_text = Text()
             
-            # Wrap text at 80 chars
-            wrapped = []
-            for i in range(0, len(current_text), 80):
-                wrapped.append(current_text[i:i+80])
+            for i in range(seq_len):
+                is_masked = masked_positions[0, i].item()
+                confidence = token_confidences[i].item()
+                
+                if is_masked:
+                    token_str = "█"
+                else:
+                    piece = token_to_piece(x[0, i].item())
+                    # Escape newlines for display
+                    token_str = piece.replace("\n", "↵").replace("\t", "→")
+                
+                # Get style based on confidence
+                style = get_confidence_style(confidence, is_masked)
+                
+                # Add token with style
+                rich_text.append(token_str, style=style)
+            
+            # Wrap text at reasonable width (accounting for backgrounds)
+            # For simplicity, we'll display as-is and let Rich handle wrapping
             
             num_masked = masked_positions.sum().item()
             elapsed = time.time() - start_time
@@ -111,7 +157,20 @@ def generate_with_animation(model, context_text, console, temperature=1.0, confi
                 Panel(f"[bold cyan]Diffusion Step {step}[/bold cyan]", border_style="cyan")
             )
             layout["output"].update(
-                Panel("\n".join(wrapped), title="Generation Progress", border_style="green")
+                Panel(rich_text, title="Token Generation (Color-Coded)", border_style="green")
+            )
+            layout["legend"].update(
+                Panel(
+                    Text.assemble(
+                        ("█", "black on white"), " Masked  ",
+                        ("██", "black on green"), " ≥95%  ",
+                        ("██", "black on cyan"), " ≥85%  ",
+                        ("██", "black on yellow"), " ≥70%  ",
+                        ("██", "black on red"), " <70%"
+                    ),
+                    title="Confidence Legend",
+                    border_style="blue"
+                )
             )
             layout["stats"].update(
                 Panel(
@@ -149,9 +208,10 @@ def main():
         f"[bold cyan]Diffusion Model Chat Interface[/bold cyan]\n\n"
         f"Model: {model_type}\n"
         f"Device: {device}\n"
+        f"Vocab Size: {config.vocab_size}\n"
         f"Sequence Length: {config.sequence_len}\n"
         f"Context Length: {config.context_len}\n\n"
-        f"[dim]Type your message and watch the diffusion process!\n"
+        f"[dim]Type your message and watch tokens appear with color-coded confidence!\n"
         f"Commands: 'quit' to exit, 'clear' to reset[/dim]",
         border_style="cyan"
     ))
@@ -194,7 +254,7 @@ def main():
         
         # Display final response
         console.print(Panel(
-            ai_response[:500],  # Limit display length
+            ai_response[:500],
             title="[bold green]AI Response[/bold green]",
             border_style="green"
         ))
