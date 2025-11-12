@@ -17,13 +17,13 @@ from tokenizer_utils import (
 @dataclass
 class DiffusionConfig:
     sequence_len: int = 128
-    vocab_size: int = 4096  # Default, override in training
-    mask_token_id: int = 1   # Default, override in training
+    vocab_size: int = 4096
+    mask_token_id: int = 1
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
     diffusion_steps: int = 128
-    context_len: int = 64
+    context_len: int = 64  # CHANGED from 16 to 64
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -152,40 +152,6 @@ class DiffusionTransformer(nn.Module):
         return logits
 
     @torch.inference_mode()
-    def sample_topk(self, batch_size, seq_len, k, num_steps=None, temperature=1.0, device=None, context_tokens=None):
-        if device is None:
-            device = self.get_device()
-        if num_steps is None:
-            num_steps = seq_len
-        x = torch.full((batch_size, seq_len), self.config.mask_token_id, dtype=torch.long, device=device)
-        context_len = 0
-        if context_tokens is not None:
-            context_tokens = context_tokens.to(device)
-            context_len = context_tokens.size(1)
-            x[:, :context_len] = context_tokens
-        masked_positions = torch.ones(batch_size, seq_len, dtype=torch.bool, device=device)
-        if context_len > 0:
-            masked_positions[:, :context_len] = False
-        for step in range(num_steps):
-            if not masked_positions.any():
-                break
-            t_batch = torch.full((batch_size,), step, device=device, dtype=torch.long)
-            t_batch = torch.clamp(t_batch, 0, self.config.diffusion_steps - 1)
-            logits = self.forward(x, t_batch)
-            probs = F.softmax(logits / temperature, dim=-1)
-            confidences, predicted_tokens = torch.max(probs, dim=-1)
-            confidences = confidences.masked_fill(~masked_positions, -float("inf"))
-            remaining = masked_positions.sum(dim=1).max().item()
-            k_actual = int(min(k, max(1, int(remaining))))
-            _, topk_indices = torch.topk(confidences, k=k_actual, dim=1)
-            for b in range(batch_size):
-                for idx in topk_indices[b]:
-                    if masked_positions[b, idx]:
-                        x[b, idx] = predicted_tokens[b, idx]
-                        masked_positions[b, idx] = False
-        return x
-
-    @torch.inference_mode()
     def sample_confidence(self, batch_size, seq_len, confidence_threshold=0.95, num_steps=None, temperature=1.0, device=None, context_tokens=None):
         if device is None:
             device = self.get_device()
@@ -220,15 +186,8 @@ class DiffusionTransformer(nn.Module):
         return x
 
     @torch.inference_mode()
-    def sample(self, batch_size, seq_len, num_steps=None, temperature=1.0, device=None, context_tokens=None, method="confidence", k=None, confidence_threshold=0.95):
-        if method == "topk":
-            if k is None:
-                k = max(1, seq_len // 10)
-            return self.sample_topk(batch_size, seq_len, k, num_steps, temperature, device, context_tokens)
-        elif method == "confidence":
-            return self.sample_confidence(batch_size, seq_len, confidence_threshold, num_steps, temperature, device, context_tokens)
-        else:
-            raise ValueError(f"Unknown sampling method: {method}")
+    def sample(self, batch_size, seq_len, num_steps=None, temperature=1.0, device=None, context_tokens=None, method="confidence", confidence_threshold=0.95):
+        return self.sample_confidence(batch_size, seq_len, confidence_threshold, num_steps, temperature, device, context_tokens)
 
 def encode_text(text, *, add_bos=False, add_eos=False):
     return bpe_encode_text(text, add_bos=add_bos, add_eos=add_eos)

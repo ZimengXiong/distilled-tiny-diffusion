@@ -1,5 +1,5 @@
 """
-Training script for discrete diffusion model with BPE tokenizer and resume support.
+Training script with [PAD] and [EOS] token support
 """
 
 import os
@@ -15,11 +15,12 @@ from tokenizer_utils import get_tokenizer, vocab_size, mask_token_id
 
 torch.serialization.add_safe_globals([DiffusionConfig])
 
-
 class MaskedDiffusionSchedule:
-    def __init__(self, num_timesteps, mask_token_id, context_len=0):
+    def __init__(self, num_timesteps, mask_token_id, pad_token_id, eos_token_id, context_len=0):
         self.num_timesteps = num_timesteps
         self.mask_token_id = mask_token_id
+        self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
         self.context_len = context_len
         self.mask_probs = torch.linspace(1.0 / num_timesteps, 1.0, num_timesteps)
 
@@ -28,28 +29,46 @@ class MaskedDiffusionSchedule:
         device = x_0.device
         mask_prob = self.mask_probs[t.cpu()].to(device)
         mask = torch.rand(B, T, device=device) < mask_prob.unsqueeze(1)
+        
+        # Don't mask context
         if self.context_len > 0:
             mask[:, :self.context_len] = False
+        
+        # Don't mask [PAD] or [EOS] tokens
+        is_special = (x_0 == self.pad_token_id) | (x_0 == self.eos_token_id)
+        mask = mask & ~is_special
+        
         mask_token = torch.full_like(x_0, self.mask_token_id)
         x_t = torch.where(mask, mask_token, x_0)
         return x_t
 
 def get_data_loader(data_path, batch_size, seq_len, device):
-    print(f"Loading and tokenizing {data_path}...")
+    """Load padded samples - each line is one complete 128-token sample"""
+    print(f"Loading padded samples from {data_path}...")
+    
+    samples = []
     with open(data_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    print(f"Text loaded: {len(text)} characters")
-    tokens = encode_text(text)
-    print(f"Tokenized: {len(tokens)} tokens")
-    dataset_size = len(tokens) - seq_len
-    if dataset_size <= 0:
-        raise ValueError(f"Dataset too small: {len(tokens)} tokens < {seq_len} seq_len")
+        for line in f:
+            line = line.strip()
+            if line:
+                # Parse space-separated token IDs
+                token_ids = [int(t) for t in line.split()]
+                if len(token_ids) == seq_len:
+                    samples.append(torch.tensor(token_ids, dtype=torch.long))
+                else:
+                    print(f"Warning: Sample has {len(token_ids)} tokens, expected {seq_len}")
+    
+    print(f"Loaded {len(samples)} samples")
+    
+    if len(samples) == 0:
+        raise ValueError("No valid samples found!")
     
     def data_generator():
         while True:
-            start_indices = torch.randint(0, dataset_size, (batch_size,))
-            batch = torch.stack([tokens[start:start + seq_len] for start in start_indices]).to(device)
+            indices = torch.randint(0, len(samples), (batch_size,))
+            batch = torch.stack([samples[i] for i in indices]).to(device)
             yield batch
+    
     return data_generator()
 
 def train_step(model, x_0, mask_schedule, optimizer):
@@ -70,7 +89,6 @@ def train_step(model, x_0, mask_schedule, optimizer):
     return loss.item()
 
 def extract_step_from_filename(filename):
-    """Extract step number from checkpoint filename"""
     match = re.search(r'step_(\d+)', str(filename))
     if match:
         return int(match.group(1))
@@ -111,7 +129,6 @@ def train(model, data_loader, mask_schedule, optimizer, scheduler, num_steps=100
                 tqdm.write(text[:300])
                 tqdm.write("---\n")
             
-            # Save checkpoint
             checkpoint_path = f"weights/{checkpoint_prefix}_step_{step + 1}.pt"
             checkpoint = {
                 'step': step + 1,
@@ -128,44 +145,36 @@ def train(model, data_loader, mask_schedule, optimizer, scheduler, num_steps=100
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Train diffusion model with optional resume")
-    parser.add_argument("--resume", type=str, default=None,
-                       help="Resume from checkpoint")
-    parser.add_argument("--steps", type=int, default=20000,
-                       help="Total training steps")
-    parser.add_argument("--batch-size", type=int, default=64,
-                       help="Batch size")
-    parser.add_argument("--lr", type=float, default=3e-4,
-                       help="Learning rate")
-    parser.add_argument("--eval-interval", type=int, default=1000,
-                       help="Sample and checkpoint interval")
-    parser.add_argument("--data", type=str, default="data/tiny_shakespeare.txt",
-                       help="Training data path")
-    parser.add_argument("--checkpoint-prefix", type=str, default="diffusion_model",
-                       help="Prefix for checkpoint filenames")
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
+    parser.add_argument("--steps", type=int, default=20000, help="Total training steps")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--eval-interval", type=int, default=1000, help="Sample and checkpoint interval")
+    parser.add_argument("--data", type=str, default="data/alpaca_padded.txt", help="Training data path")
+    parser.add_argument("--checkpoint-prefix", type=str, default="alpaca_expert", help="Prefix for checkpoint filenames")
     args = parser.parse_args()
     
     data_path = Path(args.data)
     
-    # 1. Initialize tokenizer
+    # Initialize tokenizer
     print("Initializing tokenizer...")
     get_tokenizer(data_paths=[data_path])
     v_size = vocab_size()
     m_id = mask_token_id()
     print(f"Tokenizer ready. Vocab size: {v_size}, Mask ID: {m_id}\n")
     
-    # 2. Device
+    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else
                          ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Using device: {device}\n")
     
-    # 3. Resume or create new model
+    # Resume or create new
     start_step = 0
     
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
         
-        # Extract step from checkpoint
         if 'step' in checkpoint:
             start_step = checkpoint['step']
         else:
@@ -175,7 +184,6 @@ def main():
         
         print(f"Resuming from step {start_step}")
         
-        # Calculate remaining steps
         remaining_steps = args.steps - start_step
         if remaining_steps <= 0:
             print(f"Error: Already at step {start_step}, target is {args.steps}")
@@ -183,28 +191,19 @@ def main():
         
         print(f"Will train for {remaining_steps} more steps ({start_step} → {args.steps})")
         
-        # Load config
         if 'config' in checkpoint:
             config = checkpoint['config']
         else:
             config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
         
-        # Create model and load state
         model = DiffusionTransformer(config).to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Create NEW optimizer and scheduler for remaining steps
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
         
-        # Use CosineAnnealingLR for easier resume
         from torch.optim.lr_scheduler import CosineAnnealingLR
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=remaining_steps,
-            eta_min=args.lr * 0.01
-        )
+        scheduler = CosineAnnealingLR(optimizer, T_max=remaining_steps, eta_min=args.lr * 0.01)
         
-        # Try to load optimizer state
         if 'optimizer_state_dict' in checkpoint:
             try:
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -223,7 +222,6 @@ def main():
         model = DiffusionTransformer(config).to(device)
         model.init_weights()
         
-        # MPS warmup
         if device.type == "mps":
             print("Warming up MPS...")
             with torch.no_grad():
@@ -235,32 +233,36 @@ def main():
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
         
         from torch.optim.lr_scheduler import CosineAnnealingLR
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=args.steps,
-            eta_min=args.lr * 0.01
-        )
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.01)
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {num_params:,}\n")
     
-    # 4. Training setup
-    mask_schedule = MaskedDiffusionSchedule(config.diffusion_steps, config.mask_token_id, config.context_len)
+    # Get special token IDs
+    tokenizer = get_tokenizer()
+    pad_token_id = tokenizer.token_to_id("[PAD]")
+    eos_token_id = tokenizer.token_to_id("[EOS]")
     
-    # 5. Data loader
+    print(f"Special tokens - PAD: {pad_token_id}, EOS: {eos_token_id}\n")
+    
+    # Training setup
+    mask_schedule = MaskedDiffusionSchedule(
+        config.diffusion_steps, 
+        config.mask_token_id, 
+        pad_token_id,
+        eos_token_id,
+        config.context_len
+    )
+    
+    # Data loader
     print("Creating data loader...")
     data_loader = get_data_loader(str(data_path), args.batch_size, config.sequence_len, device)
     print("Data loader ready!\n")
     
-    # 6. Context tokens
+    # Context tokens for sampling (not used with padded data)
     dataset_tokens = None
-    if config.context_len > 0:
-        with open(data_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        dataset_tokens = encode_text(text)
-        print(f"Loaded {len(dataset_tokens)} tokens for context sampling\n")
     
-    # 7. Train
+    # Train
     print(f"Starting training from step {start_step} to {args.steps}...\n")
     train(model, data_loader, mask_schedule, optimizer, scheduler, args.steps, 
           args.eval_interval, dataset_tokens, start_step, args.checkpoint_prefix)

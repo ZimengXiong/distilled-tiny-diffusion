@@ -1,6 +1,5 @@
 """
-chat.py - Single-turn chat with live diffusion animation
-128 tokens, clean single responses
+chat.py - Single-turn chat with [EOS] early stopping
 """
 
 import argparse
@@ -25,7 +24,7 @@ def load_model(checkpoint_path, device):
         config = config_saved
         config.vocab_size, config.mask_token_id = v_size, m_id
     else:
-        config = DiffusionConfig(sequence_len=128, vocab_size=v_size, mask_token_id=m_id, context_len=64)
+        config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
     
     model = DiffusionTransformer(config).to(device)
     model.load_state_dict(model_state)
@@ -40,6 +39,38 @@ def decode_tokens(tokens):
     from tokenizer_utils import decode_tokens as bpe_decode
     return bpe_decode(tokens)
 
+def extract_first_response(full_text):
+    """Extract first AI response, stop at [EOS] or speaker change"""
+    
+    # Stop at [EOS]
+    if "[EOS]" in full_text:
+        full_text = full_text.split("[EOS]")[0]
+    
+    # Find first Human 2:
+    if "Human 2:" not in full_text:
+        clean = re.sub(r'Human [12]\s*:', '', full_text).strip()
+        sentences = re.split(r'[.!?]+\s+', clean)
+        return sentences[0][:100] if sentences else "..."
+    
+    # Get text after first Human 2:
+    parts = full_text.split("Human 2:")
+    ai_text = parts[1] if len(parts) > 1 else parts[0]
+    
+    # Stop at next speaker
+    for marker in ["Human 1:", "Human 2:"]:
+        if marker in ai_text:
+            ai_text = ai_text.split(marker)[0]
+            break
+    
+    # Clean up
+    ai_text = ai_text.strip()
+    ai_text = re.sub(r'Human [12]\s*:', '', ai_text).strip()
+    
+    # Remove [PAD] tokens
+    ai_text = re.sub(r'\[PAD\]', '', ai_text).strip()
+    
+    return ai_text if ai_text else "..."
+
 def clear_screen():
     print("\033[2J\033[H", end="", flush=True)
 
@@ -47,13 +78,17 @@ def print_at(row, col, text):
     print(f"\033[{row};{col}H{text}", end="", flush=True)
 
 def generate_response(model, user_input, device, temperature=1.0, confidence=0.9):
-    """Generate with animation"""
+    """Generate with [EOS] early stopping"""
+    
+    from tokenizer_utils import get_tokenizer
+    tokenizer = get_tokenizer()
+    eos_token_id = tokenizer.token_to_id("[EOS]")
     
     # Format input
     input_text = f"Human 1: {user_input} Human 2: "
     input_tokens = encode_text(input_text)
     
-    # Truncate context if needed
+    # Truncate if needed
     max_context = 64
     if len(input_tokens) > max_context:
         input_tokens = input_tokens[-max_context:]
@@ -73,6 +108,7 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
     
     step = 0
     start_time = time.time()
+    eos_found = False
     
     # Setup display
     clear_screen()
@@ -81,8 +117,8 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
     print("╚════════════════════════════════════════════════════════════════════╝")
     print()
     
-    # Generation loop with animation
-    while masked_positions.any():
+    # Generation loop
+    while masked_positions.any() and not eos_found:
         t_batch = torch.full((1,), step, device=device, dtype=torch.long)
         t_batch = torch.clamp(t_batch, 0, model.config.diffusion_steps - 1)
         
@@ -100,10 +136,13 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
             
             x = torch.where(above_threshold, predicted_tokens, x)
             masked_positions = masked_positions & ~above_threshold
+            
+            # Check for [EOS]
+            if (x[0, ctx_len:] == eos_token_id).any():
+                eos_found = True
         
-        # Animate every 2 steps
-        if step % 2 == 0:
-            # Decode current state
+        # Animation
+        if step % 3 == 0:
             text_parts = []
             current_segment = []
             
@@ -120,50 +159,31 @@ def generate_response(model, user_input, device, temperature=1.0, confidence=0.9
                 text_parts.append(decode_tokens(torch.tensor(current_segment)))
             
             current_text = "".join(text_parts)
+            display = extract_first_response(current_text)
             
-            # Extract just the AI part for display
-            if "Human 2:" in current_text:
-                display = current_text.split("Human 2:")[-1]
-            else:
-                display = current_text[ctx_len:]
-            
-            # Wrap at 66 chars
             lines = []
             for i in range(0, len(display), 66):
                 lines.append(display[i:i+66])
             
-            # Display up to 10 lines
             for idx in range(10):
                 if idx < len(lines):
                     print_at(5 + idx, 1, f"  {lines[idx]:<66}")
                 else:
                     print_at(5 + idx, 1, " " * 70)
             
-            # Stats
             num_masked = masked_positions.sum().item()
             elapsed = time.time() - start_time
             print_at(17, 1, "─" * 70)
-            print_at(18, 1, f"  Step: {step:3d} | Masked: {num_masked:3d}/{seq_len} | Time: {elapsed:.1f}s" + " " * 20)
+            status = "[EOS FOUND]" if eos_found else ""
+            print_at(18, 1, f"  Step: {step:3d} | Masked: {num_masked:3d}/{seq_len} | Time: {elapsed:.1f}s {status}" + " " * 10)
         
         step += 1
-        time.sleep(0.015)  # Smooth animation
+        time.sleep(0.02)
     
     # Final decode
     full_text = decode_tokens(x[0])
+    ai_response = extract_first_response(full_text)
     
-    # Extract AI response
-    if "Human 2:" in full_text:
-        ai_response = full_text.split("Human 2:")[-1].strip()
-        for marker in ["Human 1:", "Human 2:"]:
-            if marker in ai_response:
-                ai_response = ai_response.split(marker)[0].strip()
-                break
-    else:
-        ai_response = full_text.strip()
-    
-    ai_response = re.sub(r'Human [12]\s*:', '', ai_response).strip()
-    
-    # Move cursor down
     print_at(20, 1, "")
     print("\n" + "="*70)
     
@@ -184,7 +204,7 @@ def main():
     print(f"Ready! Seq: {config.sequence_len} tokens\n")
     
     print("╔════════════════════════════════════════════════════════════════════╗")
-    print("║                    DIFFUSION CHAT (128 Tokens)                    ║")
+    print("║                    ALPACA EXPERT CHAT                             ║")
     print("║  Type 'quit' to exit                                              ║")
     print("╚════════════════════════════════════════════════════════════════════╝\n")
     
