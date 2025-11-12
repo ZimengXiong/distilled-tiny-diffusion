@@ -1,6 +1,5 @@
 """
-Training script for discrete diffusion model with a BPE tokenizer.
-Supports resuming from checkpoints with --resume flag.
+Training script for discrete diffusion model with BPE tokenizer and resume support.
 """
 
 import os
@@ -13,6 +12,9 @@ from tqdm import tqdm
 
 from model import DiffusionTransformer, DiffusionConfig, encode_text, decode_tokens
 from tokenizer_utils import get_tokenizer, vocab_size, mask_token_id
+
+torch.serialization.add_safe_globals([DiffusionConfig])
+
 
 class MaskedDiffusionSchedule:
     def __init__(self, num_timesteps, mask_token_id, context_len=0):
@@ -68,7 +70,7 @@ def train_step(model, x_0, mask_schedule, optimizer):
     return loss.item()
 
 def extract_step_from_filename(filename):
-    """Extract step number from checkpoint filename like 'model_step_1000.pt'"""
+    """Extract step number from checkpoint filename"""
     match = re.search(r'step_(\d+)', str(filename))
     if match:
         return int(match.group(1))
@@ -127,7 +129,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Train diffusion model with optional resume")
     parser.add_argument("--resume", type=str, default=None,
-                       help="Resume from checkpoint (e.g., 'weights/diffusion_model_step_5000.pt')")
+                       help="Resume from checkpoint")
     parser.add_argument("--steps", type=int, default=20000,
                        help="Total training steps")
     parser.add_argument("--batch-size", type=int, default=64,
@@ -167,49 +169,57 @@ def main():
         if 'step' in checkpoint:
             start_step = checkpoint['step']
         else:
-            # Try to extract from filename
             step_from_name = extract_step_from_filename(args.resume)
             if step_from_name:
                 start_step = step_from_name
         
         print(f"Resuming from step {start_step}")
         
+        # Calculate remaining steps
+        remaining_steps = args.steps - start_step
+        if remaining_steps <= 0:
+            print(f"Error: Already at step {start_step}, target is {args.steps}")
+            return
+        
+        print(f"Will train for {remaining_steps} more steps ({start_step} → {args.steps})")
+        
         # Load config
         if 'config' in checkpoint:
             config = checkpoint['config']
         else:
-            # Fallback: create config with tokenizer values
             config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
         
         # Create model and load state
         model = DiffusionTransformer(config).to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Create optimizer and scheduler
+        # Create NEW optimizer and scheduler for remaining steps
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-        from torch.optim.lr_scheduler import OneCycleLR
-        scheduler = OneCycleLR(
+        
+        # Use CosineAnnealingLR for easier resume
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(
             optimizer,
-            max_lr=args.lr,
-            total_steps=args.steps,
-            pct_start=0.1,
-            anneal_strategy='cos'
+            T_max=remaining_steps,
+            eta_min=args.lr * 0.01
         )
         
-        # Load optimizer and scheduler states
+        # Try to load optimizer state
         if 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            try:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print("Optimizer state restored")
+            except Exception as e:
+                print(f"Warning: Could not restore optimizer state: {e}")
+                print("Starting with fresh optimizer")
         
-        print(f"Model, optimizer, and scheduler restored from checkpoint\n")
+        print(f"Model and optimizer restored\n")
+        
     else:
         print("Starting fresh training...")
-        # Create new config
         config = DiffusionConfig(vocab_size=v_size, mask_token_id=m_id)
-        print(f"Config: seq_len={config.sequence_len}, vocab={config.vocab_size}, mask_id={config.mask_token_id}")
+        print(f"Config: seq_len={config.sequence_len}, vocab={config.vocab_size}")
         
-        # Create new model
         model = DiffusionTransformer(config).to(device)
         model.init_weights()
         
@@ -222,15 +232,13 @@ def main():
                 _ = model(dummy, dummy_t)
             print("MPS ready!")
         
-        # Create optimizer and scheduler
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-        from torch.optim.lr_scheduler import OneCycleLR
-        scheduler = OneCycleLR(
+        
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(
             optimizer,
-            max_lr=args.lr,
-            total_steps=args.steps,
-            pct_start=0.1,
-            anneal_strategy='cos'
+            T_max=args.steps,
+            eta_min=args.lr * 0.01
         )
     
     num_params = sum(p.numel() for p in model.parameters())
