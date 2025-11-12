@@ -1,5 +1,6 @@
 """
 Training script with [PAD] and [EOS] token support
+FIXED: Loads sample data for proper evaluation context
 """
 
 import os
@@ -114,8 +115,10 @@ def train(model, data_loader, mask_schedule, optimizer, scheduler, num_steps=100
                 context_tokens = None
                 if model.config.context_len > 0 and dataset_tokens is not None:
                     ctx_len = model.config.context_len
-                    start_idx = torch.randint(0, len(dataset_tokens) - ctx_len, (1,)).item()
-                    context_tokens = dataset_tokens[start_idx:start_idx + ctx_len].unsqueeze(0)
+                    # Use first ctx_len tokens from dataset_tokens as context
+                    if len(dataset_tokens) >= ctx_len:
+                        context_tokens = dataset_tokens[:ctx_len].unsqueeze(0)
+                
                 samples = model.sample(
                     batch_size=1,
                     seq_len=model.config.sequence_len,
@@ -259,8 +262,17 @@ def main():
     data_loader = get_data_loader(str(data_path), args.batch_size, config.sequence_len, device)
     print("Data loader ready!\n")
     
-    # Context tokens for sampling (not used with padded data)
-    dataset_tokens = None
+    # CRITICAL FIX: Load first sample for evaluation context
+    print("Loading sample for evaluation context...")
+    with open(data_path, 'r') as f:
+        first_line = f.readline().strip()
+        dataset_tokens = torch.tensor([int(t) for t in first_line.split()], dtype=torch.long)
+    
+    print(f"Evaluation context loaded: {len(dataset_tokens)} tokens")
+    
+    # Decode to show what we're using
+    sample_text = decode_tokens(dataset_tokens[:64])
+    print(f"Sample context: {sample_text[:100]}...\n")
     
     # Train
     print(f"Starting training from step {start_step} to {args.steps}...\n")
